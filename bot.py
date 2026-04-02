@@ -1,3 +1,6 @@
+if __name__ == "__main__":
+    send_to_telegram("✅ TEST XABAR")  # BU YERGA
+    run()
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
