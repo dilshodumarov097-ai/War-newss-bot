@@ -1,9 +1,14 @@
-if __name__ == "__main__":
-    send_to_telegram("✅ TEST XABAR")  # BU YERGA
-    run()
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import os
+import time
+import hashlib
+import json
+import feedparser
+import requests
+from datetime import datetime
 
+# ---------- Keep-alive server (Render uchun)
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -16,36 +21,32 @@ def start_server():
     HTTPServer(("0.0.0.0", 10000), Handler).serve_forever()
 
 threading.Thread(target=start_server, daemon=True).start()
-import os
-import time
-import hashlib
-import json
-import feedparser
-import requests
-from datetime import datetime
 
+# ---------- Env variables
 TG_TOKEN = os.environ.get("TG_TOKEN")
 TG_CHANNEL = os.environ.get("TG_CHANNEL")
 GEM_KEY = os.environ.get("GEM_KEY")
+
 CHECK_INTERVAL = 300
 SEEN_FILE = "seen_articles.json"
 
+# ---------- RSS feeds
 RSS_FEEDS = [
     {"name": "Reuters", "url": "https://feeds.reuters.com/reuters/worldNews"},
-    {"name": "BBC World", "url": "https://feeds.bbci.co.uk/news/world/rss.xml"},
+    {"name": "BBC", "url": "https://feeds.bbci.co.uk/news/world/rss.xml"},
     {"name": "The Guardian", "url": "https://www.theguardian.com/world/rss"},
     {"name": "Al Jazeera", "url": "https://www.aljazeera.com/xml/rss/all.xml"},
-    {"name": "DW News", "url": "https://rss.dw.com/xml/rss-en-world"},
+    {"name": "DW", "url": "https://rss.dw.com/xml/rss-en-world"},
 ]
 
-WAR_KEYWORDS = [
-    "war", "conflict", "attack", "missile", "strike", "troops", "military",
-    "battle", "killed", "wounded", "bombing", "invasion", "ceasefire",
-    "ukraine", "russia", "gaza", "israel", "palestine", "nato", "weapons",
-    "airstrike", "artillery", "casualties", "frontline", "offensive",
-    "iran", "hamas", "hezbollah", "sudan", "myanmar", "yemen"
+KEYWORDS = [
+    "war","conflict","attack","missile","military","troops","battle",
+    "economy","inflation","oil","gas","sanctions","trade","market",
+    "politics","government","president","election","law","nato",
+    "ukraine","russia","china","usa","israel","gaza","iran"
 ]
 
+# ---------- Seen articles
 def load_seen():
     if os.path.exists(SEEN_FILE):
         with open(SEEN_FILE, "r") as f:
@@ -56,71 +57,100 @@ def save_seen(seen):
     with open(SEEN_FILE, "w") as f:
         json.dump(list(seen)[-500:], f)
 
-def is_war_news(title, summary=""):
+# ---------- Filter keywords
+def is_relevant(title, summary):
     text = (title + " " + summary).lower()
-    return any(kw in text for kw in WAR_KEYWORDS)
+    return any(k in text for k in KEYWORDS)
 
-def translate_to_uzbek(title, summary, source):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEM_KEY}"
-    prompt = f"""Quyidagi inglizcha yangilikni O'zbek tiliga tarjima qil.
-Faqat tarjima qil, hech qanday izoh qo'shma.
-Aynan shu formatda yoz:
+# ---------- Gemini translate
+def translate(title, summary, source):
+    if not GEM_KEY:
+        return f"📰 {title}\n\n{summary[:200]}...\n\n🗺 {source}"
 
-📰 [sarlavha]
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEM_KEY}"
+        prompt = f"""
+Quyidagini o'zbek tiliga tarjima qil.
 
-[qisqa mazmun 2-3 gap]
+📰 Sarlavha
+Qisqa 2-3 gap
 
-🗺 Manba: {source}
+Manba: {source}
 
-Sarlavha: {title}
-Mazmun: {summary[:500] if summary else ''}"""
-    body = {"contents": [{"parts": [{"text": prompt}]}]}
-    resp = requests.post(url, json=body, timeout=15)
-    data = resp.json()
-    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+Title: {title}
+Summary: {summary[:400]}
+"""
+        body = {"contents":[{"parts":[{"text":prompt}]}]}
+        r = requests.post(url, json=body, timeout=15)
+        data = r.json()
+        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
-def send_to_telegram(text):
-    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    payload = {"chat_id": TG_CHANNEL, "text": text, "disable_web_page_preview": False}
-    resp = requests.post(url, json=payload, timeout=10)
-    return resp.ok
+    except Exception as e:
+        print("Gemini xato:", e)
+        return f"📰 {title}\n\n{summary[:200]}...\n\n🗺 {source}"
 
+# ---------- Telegram send
+def send(text):
+    if not TG_TOKEN or not TG_CHANNEL:
+        print("ENV variables yo‘q!")
+        return False
+    try:
+        url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+        payload = {"chat_id": TG_CHANNEL, "text": text, "disable_web_page_preview": False}
+        r = requests.post(url, json=payload, timeout=10)
+        print("TG:", r.status_code)
+        return r.ok
+    except Exception as e:
+        print("Telegram xato:", e)
+        return False
+
+# ---------- Main loop
 def run():
     print("Bot ishga tushdi!")
     seen = load_seen()
+
     while True:
         new_articles = []
-        for feed_info in RSS_FEEDS:
-            try:
-                feed = feedparser.parse(feed_info["url"])
-                for entry in feed.entries[:10]:
-                    title = entry.get("title", "")
-                    summary = entry.get("summary", "")
-                    link = entry.get("link", "")
-                    article_id = hashlib.md5(link.encode()).hexdigest()
-                    if article_id in seen:
-                        continue
-                    if not is_war_news(title, summary):
-                        continue
-                    new_articles.append({"id": article_id, "title": title, "summary": summary, "link": link, "source": feed_info["name"]})
-                    seen.add(article_id)
-            except Exception as e:
-                print(f"Xato {feed_info['name']}: {e}")
 
-        for article in new_articles:
+        for feed in RSS_FEEDS:
             try:
-                uzbek_text = translate_to_uzbek(article["title"], article["summary"], article["source"])
-                full_message = f"{uzbek_text}\n\n🔗 {article['link']}"
-                success = send_to_telegram(full_message)
-                print(f"{'OK' if success else 'XATO'}: {article['title'][:60]}")
+                data = feedparser.parse(feed["url"])
+                for e in data.entries[:10]:
+                    title = e.get("title","")
+                    summary = e.get("summary","")
+                    link = e.get("link","")
+                    aid = hashlib.md5(link.encode()).hexdigest()
+                    if aid in seen:
+                        continue
+                    if not is_relevant(title, summary):
+                        continue
+                    new_articles.append({
+                        "id": aid,
+                        "title": title,
+                        "summary": summary,
+                        "link": link,
+                        "source": feed["name"]
+                    })
+                    seen.add(aid)
+            except Exception as er:
+                print("Feed xato:", er)
+
+        print(f"Topildi: {len(new_articles)} yangi maqola")
+
+        for a in new_articles:
+            try:
+                text = translate(a["title"], a["summary"], a["source"])
+                msg = f"{text}\n\n🔗 {a['link']}"
+                send(msg)
                 time.sleep(3)
-            except Exception as e:
-                print(f"Yuborishda xato: {e}")
+            except Exception as er:
+                print("Send xato:", er)
 
         save_seen(seen)
-        print(f"Kutilmoqda... {datetime.now().strftime('%H:%M')}")
+        print("Kutish...", datetime.now())
         time.sleep(CHECK_INTERVAL)
 
+# ---------- START
 if __name__ == "__main__":
+    send("✅ BOT ISHGA TUSHDI")
     run()
-send_to_telegram("✅ TEST XABAR")
