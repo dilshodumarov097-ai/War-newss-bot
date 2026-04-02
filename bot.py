@@ -8,7 +8,7 @@ import feedparser
 import requests
 from datetime import datetime
 
-# ---------- Keep-alive server (Render uchun)
+# ---------- Keep-alive server (Render)
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -39,12 +39,12 @@ RSS_FEEDS = [
     {"name": "DW", "url": "https://rss.dw.com/xml/rss-en-world"},
 ]
 
-KEYWORDS = [
-    "war","conflict","attack","missile","military","troops","battle",
-    "economy","inflation","oil","gas","sanctions","trade","market",
-    "politics","government","president","election","law","nato",
-    "ukraine","russia","china","usa","israel","gaza","iran"
-]
+# ---------- Keywords va kategoriya
+CATEGORIES = {
+    "Urush": ["war","conflict","attack","missile","military","troops","battle","ukraine","russia","israel","gaza","nato","iran","hamas","hezbollah"],
+    "Iqtisod": ["economy","inflation","oil","gas","sanctions","trade","market","finance","stock","investment","currency"],
+    "Siyosat": ["politics","government","president","election","law","nato","policy","minister","parliament"]
+}
 
 # ---------- Seen articles
 def load_seen():
@@ -57,28 +57,34 @@ def save_seen(seen):
     with open(SEEN_FILE, "w") as f:
         json.dump(list(seen)[-500:], f)
 
-# ---------- Filter keywords
-def is_relevant(title, summary):
+# ---------- Kategoriya aniqlash
+def get_category(title, summary):
     text = (title + " " + summary).lower()
-    return any(k in text for k in KEYWORDS)
+    for cat, kws in CATEGORIES.items():
+        if any(k in text for k in kws):
+            return cat
+    return "Boshqa"
 
 # ---------- Gemini translate
 def translate(title, summary, source):
     if not GEM_KEY:
-        return f"📰 {title}\n\n{summary[:200]}...\n\n🗺 {source}"
+        return f"📰 {title}\n\n{summary[:200]}...\n\n🗺 Manba: {source}"
 
     try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEM_KEY}"
         prompt = f"""
-Quyidagini o'zbek tiliga tarjima qil.
+Quyidagi inglizcha yoki boshqa tilidagi yangilikni O'zbek tiliga tarjima qil.
+Faqat tarjima qil, hech qanday izoh qo'shma.
+Aynan shu formatda yoz:
 
 📰 Sarlavha
-Qisqa 2-3 gap
 
-Manba: {source}
+[qisqa mazmun 2-3 gap]
 
-Title: {title}
-Summary: {summary[:400]}
+🗺 Manba: {source}
+
+Sarlavha: {title}
+Mazmun: {summary[:500] if summary else ''}
 """
         body = {"contents":[{"parts":[{"text":prompt}]}]}
         r = requests.post(url, json=body, timeout=15)
@@ -87,7 +93,7 @@ Summary: {summary[:400]}
 
     except Exception as e:
         print("Gemini xato:", e)
-        return f"📰 {title}\n\n{summary[:200]}...\n\n🗺 {source}"
+        return f"📰 {title}\n\n{summary[:200]}...\n\n🗺 Manba: {source}"
 
 # ---------- Telegram send
 def send(text):
@@ -122,14 +128,16 @@ def run():
                     aid = hashlib.md5(link.encode()).hexdigest()
                     if aid in seen:
                         continue
-                    if not is_relevant(title, summary):
+                    cat = get_category(title, summary)
+                    if cat == "Boshqa":
                         continue
                     new_articles.append({
                         "id": aid,
                         "title": title,
                         "summary": summary,
                         "link": link,
-                        "source": feed["name"]
+                        "source": feed["name"],
+                        "category": cat
                     })
                     seen.add(aid)
             except Exception as er:
@@ -140,7 +148,7 @@ def run():
         for a in new_articles:
             try:
                 text = translate(a["title"], a["summary"], a["source"])
-                msg = f"{text}\n\n🔗 {a['link']}"
+                msg = f"📰 Kategoriya: {a['category']}\n\n{text}\n\n🔗 {a['link']}"
                 send(msg)
                 time.sleep(3)
             except Exception as er:
