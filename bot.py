@@ -1,164 +1,116 @@
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import os
-import time
-import hashlib
-import json
-import feedparser
-import requests
+import os, time, hashlib, json, feedparser, requests
 from datetime import datetime
 
-# ---------- Keep-alive server (Render)
+# ===== KEEP ALIVE =====
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot ishlayapti!")
-    def log_message(self, *args):
-        pass
+        self.wfile.write(b"OK")
+    def log_message(self, *args): pass
 
-def start_server():
+def server():
     HTTPServer(("0.0.0.0", 10000), Handler).serve_forever()
 
-threading.Thread(target=start_server, daemon=True).start()
+threading.Thread(target=server, daemon=True).start()
 
-# ---------- Env variables
+# ===== ENV =====
 TG_TOKEN = os.environ.get("TG_TOKEN")
 TG_CHANNEL = os.environ.get("TG_CHANNEL")
 GEM_KEY = os.environ.get("GEM_KEY")
 
-CHECK_INTERVAL = 300
-SEEN_FILE = "seen_articles.json"
+SEEN_FILE = "seen.json"
+CHECK_INTERVAL = 600
 
-# ---------- RSS feeds
-RSS_FEEDS = [
-    {"name": "Reuters", "url": "https://feeds.reuters.com/reuters/worldNews"},
-    {"name": "BBC", "url": "https://feeds.bbci.co.uk/news/world/rss.xml"},
-    {"name": "The Guardian", "url": "https://www.theguardian.com/world/rss"},
-    {"name": "Al Jazeera", "url": "https://www.aljazeera.com/xml/rss/all.xml"},
-    {"name": "DW", "url": "https://rss.dw.com/xml/rss-en-world"},
+RSS = [
+    "https://feeds.reuters.com/reuters/worldNews",
+    "https://feeds.bbci.co.uk/news/world/rss.xml"
 ]
 
-# ---------- Keywords va kategoriya
-CATEGORIES = {
-    "Urush": ["war","conflict","attack","missile","military","troops","battle","ukraine","russia","israel","gaza","nato","iran","hamas","hezbollah"],
-    "Iqtisod": ["economy","inflation","oil","gas","sanctions","trade","market","finance","stock","investment","currency"],
-    "Siyosat": ["politics","government","president","election","law","nato","policy","minister","parliament"]
-}
-
-# ---------- Seen articles
+# ===== SEEN =====
 def load_seen():
     if os.path.exists(SEEN_FILE):
-        with open(SEEN_FILE, "r") as f:
-            return set(json.load(f))
+        return set(json.load(open(SEEN_FILE)))
     return set()
 
-def save_seen(seen):
-    with open(SEEN_FILE, "w") as f:
-        json.dump(list(seen)[-500:], f)
+def save_seen(s):
+    json.dump(list(s)[-500:], open(SEEN_FILE,"w"))
 
-# ---------- Kategoriya aniqlash
-def get_category(title, summary):
-    text = (title + " " + summary).lower()
-    for cat, kws in CATEGORIES.items():
-        if any(k in text for k in kws):
-            return cat
-    return "Boshqa"
-
-# ---------- Gemini translate
-def translate(title, summary, source):
-    if not GEM_KEY:
-        return f"📰 {title}\n\n{summary[:200]}...\n\n🗺 Manba: {source}"
-
+# ===== TRANSLATE =====
+def translate(title, summary):
     try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEM_KEY}"
-        prompt = f"""
-Quyidagi inglizcha yoki boshqa tilidagi yangilikni O'zbek tiliga tarjima qil.
-Faqat tarjima qil, hech qanday izoh qo'shma.
-Aynan shu formatda yoz:
-
-📰 Sarlavha
-
-[qisqa mazmun 2-3 gap]
-
-🗺 Manba: {source}
-
-Sarlavha: {title}
-Mazmun: {summary[:500] if summary else ''}
-"""
+        prompt = f"O'zbek tiliga tarjima qil:\n{title}\n{summary[:300]}"
         body = {"contents":[{"parts":[{"text":prompt}]}]}
-        r = requests.post(url, json=body, timeout=15)
-        data = r.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        r = requests.post(url,json=body,timeout=10)
+        return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+    except:
+        return f"{title}\n\n{summary[:150]}..."
 
-    except Exception as e:
-        print("Gemini xato:", e)
-        return f"📰 {title}\n\n{summary[:200]}...\n\n🗺 Manba: {source}"
+# ===== TELEGRAM =====
+def send(msg):
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+    requests.post(url,json={"chat_id":TG_CHANNEL,"text":msg})
 
-# ---------- Telegram send
-def send(text):
-    if not TG_TOKEN or not TG_CHANNEL:
-        print("ENV variables yo‘q!")
-        return False
+# ===== WEATHER =====
+def weather():
     try:
-        url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-        payload = {"chat_id": TG_CHANNEL, "text": text, "disable_web_page_preview": False}
-        r = requests.post(url, json=payload, timeout=10)
-        print("TG:", r.status_code)
-        return r.ok
-    except Exception as e:
-        print("Telegram xato:", e)
-        return False
+        r = requests.get("https://api.open-meteo.com/v1/forecast?latitude=41.3&longitude=69.2&current_weather=true")
+        temp = r.json()["current_weather"]["temperature"]
+        return f"🌤 Toshkent: {temp}°C"
+    except:
+        return "🌤 Ob-havo mavjud emas"
 
-# ---------- Main loop
+# ===== CURRENCY =====
+def currency():
+    try:
+        r = requests.get("https://open.er-api.com/v6/latest/USD")
+        uzs = r.json()["rates"]["UZS"]
+        return f"💰 $1 = {int(uzs)} so‘m"
+    except:
+        return "💰 Valyuta mavjud emas"
+
+# ===== DAILY =====
+def daily():
+    return f"{weather()}\n{currency()}\n\n📰 Bugungi yangiliklar kuzatib boring"
+
+# ===== MAIN =====
 def run():
-    print("Bot ishga tushdi!")
     seen = load_seen()
+    last_day = ""
 
     while True:
-        new_articles = []
+        now = datetime.now().strftime("%Y-%m-%d")
 
-        for feed in RSS_FEEDS:
-            try:
-                data = feedparser.parse(feed["url"])
-                for e in data.entries[:10]:
-                    title = e.get("title","")
-                    summary = e.get("summary","")
-                    link = e.get("link","")
-                    aid = hashlib.md5(link.encode()).hexdigest()
-                    if aid in seen:
-                        continue
-                    cat = get_category(title, summary)
-                    if cat == "Boshqa":
-                        continue
-                    new_articles.append({
-                        "id": aid,
-                        "title": title,
-                        "summary": summary,
-                        "link": link,
-                        "source": feed["name"],
-                        "category": cat
-                    })
-                    seen.add(aid)
-            except Exception as er:
-                print("Feed xato:", er)
+        # DAILY POST
+        if now != last_day and datetime.now().hour == 9:
+            send(daily())
+            last_day = now
 
-        print(f"Topildi: {len(new_articles)} yangi maqola")
+        # NEWS
+        for url in RSS:
+            feed = feedparser.parse(url)
+            for e in feed.entries[:5]:
+                link = e.link
+                h = hashlib.md5(link.encode()).hexdigest()
+                if h in seen: continue
 
-        for a in new_articles:
-            try:
-                text = translate(a["title"], a["summary"], a["source"])
-                msg = f"📰 Kategoriya: {a['category']}\n\n{text}\n\n🔗 {a['link']}"
+                title = e.title
+                summary = e.summary if "summary" in e else ""
+
+                text = translate(title, summary)
+                msg = f"📰 {text}\n\n🔗 {link}"
                 send(msg)
+
+                seen.add(h)
                 time.sleep(3)
-            except Exception as er:
-                print("Send xato:", er)
 
         save_seen(seen)
-        print("Kutish...", datetime.now())
         time.sleep(CHECK_INTERVAL)
 
-# ---------- START
+# ===== START =====
 if __name__ == "__main__":
-    send("✅ BOT ISHGA TUSHDI")
+    send("✅ BOT ISHLAYAPTI")
     run()
