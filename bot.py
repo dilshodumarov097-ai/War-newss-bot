@@ -7,27 +7,15 @@ import json
 import feedparser
 import requests
 from datetime import datetime
-import schedule
+from pytz import timezone
 
-# ------------------ HTTP server (Render uyquga tushmasligi uchun) ------------------
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot ishlayapti!")
-    def log_message(self, *args):
-        pass
-
-def start_server():
-    HTTPServer(("0.0.0.0", 10000), Handler).serve_forever()
-
-threading.Thread(target=start_server, daemon=True).start()
-
-# ------------------ Telegram va Gemini sozlash ------------------
+# =======================
+# Config
+# =======================
 TG_TOKEN = os.environ.get("TG_TOKEN")
 TG_CHANNEL = os.environ.get("TG_CHANNEL")
 GEM_KEY = os.environ.get("GEM_KEY")
-CHECK_INTERVAL = 300  # 5 daqiqa
+CHECK_INTERVAL = 300  # yangiliklarni tekshirish (5 daqiqa)
 SEEN_FILE = "seen_articles.json"
 
 RSS_FEEDS = [
@@ -44,10 +32,34 @@ WAR_KEYWORDS = [
     "ukraine", "russia", "gaza", "israel", "palestine", "nato", "weapons",
     "airstrike", "artillery", "casualties", "frontline", "offensive",
     "iran", "hamas", "hezbollah", "sudan", "myanmar", "yemen",
-    "economy", "market", "finance", "inflation", "currency", "trade", "politics", "government"
+    "economy", "finance", "stock", "currency", "inflation", "market",
+    "politics", "government", "election", "policy", "law"
 ]
 
-# ------------------ Seen articles ------------------
+CITY = "Tashkent"  # ob-havo shahri
+CURRENCY = ["USD", "EUR", "RUB"]  # valyutalar
+OBHAVA_API = os.environ.get("OBHAVA_API")  # OpenWeatherMap API key
+
+# =======================
+# Simple Web Server for Render
+# =======================
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot ishlayapti!")
+    def log_message(self, *args):
+        pass
+
+def start_server():
+    port = int(os.environ.get("PORT", 10000))
+    HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+
+threading.Thread(target=start_server, daemon=True).start()
+
+# =======================
+# Seen Articles
+# =======================
 def load_seen():
     if os.path.exists(SEEN_FILE):
         with open(SEEN_FILE, "r") as f:
@@ -58,15 +70,17 @@ def save_seen(seen):
     with open(SEEN_FILE, "w") as f:
         json.dump(list(seen)[-500:], f)
 
-# ------------------ Yangilik filtr ------------------
-def is_relevant_news(title, summary=""):
+# =======================
+# Helpers
+# =======================
+def is_war_news(title, summary=""):
     text = (title + " " + summary).lower()
     return any(kw in text for kw in WAR_KEYWORDS)
 
-# ------------------ Gemini orqali tarjima ------------------
 def translate_to_uzbek(title, summary, source):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEM_KEY}"
-    prompt = f"""Quyidagi inglizcha yangilikni O'zbek tiliga tarjima qil.
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEM_KEY}"
+        prompt = f"""Quyidagi inglizcha yangilikni O'zbek tiliga tarjima qil.
 Faqat tarjima qil, hech qanday izoh qo'shma.
 Aynan shu formatda yoz:
 
@@ -78,53 +92,61 @@ Aynan shu formatda yoz:
 
 Sarlavha: {title}
 Mazmun: {summary[:500] if summary else ''}"""
-    body = {"contents": [{"parts": [{"text": prompt}]}]}
-    try:
+        body = {"contents": [{"parts": [{"text": prompt}]}]}
         resp = requests.post(url, json=body, timeout=15)
         data = resp.json()
         return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except:
-        return f"📰 {title}\n\n{summary[:300]}...\n\n🗺 Manba: {source}"
+    except Exception as e:
+        print(f"Gemini API xato: {e}")
+        return f"{title}\n{summary[:200]}...\nManba: {source}"
 
-# ------------------ Telegramga yuborish ------------------
 def send_to_telegram(text):
-    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    payload = {"chat_id": TG_CHANNEL, "text": text, "disable_web_page_preview": False}
     try:
+        url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+        payload = {"chat_id": TG_CHANNEL, "text": text, "disable_web_page_preview": False}
         resp = requests.post(url, json=payload, timeout=10)
         return resp.ok
-    except:
+    except Exception as e:
+        print(f"Telegram xato: {e}")
         return False
 
-# ------------------ Har kuni ertalab ob-havo va valyuta ------------------
-def morning_update():
+# =======================
+# Ob-havo va valyuta
+# =======================
+def send_morning_update():
+    # Ob-havo
     try:
-        # Ob-havo API
-        weather_resp = requests.get("https://api.open-meteo.com/v1/forecast?latitude=41.3&longitude=69.2&daily=temperature_2m_max,temperature_2m_min&timezone=Asia/Tashkent")
-        weather_data = weather_resp.json()
-        temp_max = weather_data["daily"]["temperature_2m_max"][0]
-        temp_min = weather_data["daily"]["temperature_2m_min"][0]
-        
-        # Valyuta kursi API
-        currency_resp = requests.get("https://api.exchangerate.host/latest?base=USD&symbols=UZS")
-        currency_data = currency_resp.json()
-        usd_uzs = currency_data["rates"]["UZS"]
+        w_url = f"http://api.openweathermap.org/data/2.5/weather?q={CITY}&appid={OBHAVA_API}&units=metric"
+        w_data = requests.get(w_url, timeout=10).json()
+        weather_msg = f"🌤 Ob-havo {CITY}:\nTemperatura: {w_data['main']['temp']}°C\nHavo: {w_data['weather'][0]['description']}"
+    except:
+        weather_msg = f"🌤 Ob-havo {CITY} ma'lumot topilmadi."
 
-        text = f"🌅 Salom! Bugungi ertalab yangiliklar:\n\n"
-        text += f"🌡 Toshkent ob-havo: Max {temp_max}°C, Min {temp_min}°C\n"
-        text += f"💵 Valyuta kursi: 1 USD = {usd_uzs} UZS\n"
-        send_to_telegram(text)
-        print("Ertalabki yangilik yuborildi.")
-    except Exception as e:
-        print(f"Ertalabki yangilikda xato: {e}")
+    # Valyuta
+    try:
+        c_msg = "💱 Valyuta kurslari:\n"
+        for cur in CURRENCY:
+            r = requests.get(f"https://api.exchangerate.host/latest?base=UZS&symbols={cur}", timeout=10).json()
+            c_msg += f"{cur}: {r['rates'][cur]:.2f}\n"
+    except:
+        c_msg += "Ma'lumot topilmadi."
 
-schedule.every().day.at("09:00").do(morning_update)
+    send_to_telegram(f"☀️ Ertalabgi yangiliklar:\n\n{weather_msg}\n\n{c_msg}")
 
-# ------------------ Bot ishchi sikli ------------------
+# =======================
+# Main Bot Loop
+# =======================
 def run():
     print("Bot ishga tushdi!")
     seen = load_seen()
+    last_morning = None
     while True:
+        now = datetime.now(timezone('Asia/Tashkent'))
+        # Har kuni ertalab 08:00
+        if now.hour == 8 and (last_morning != now.date()):
+            send_morning_update()
+            last_morning = now.date()
+
         new_articles = []
         for feed_info in RSS_FEEDS:
             try:
@@ -136,7 +158,7 @@ def run():
                     article_id = hashlib.md5(link.encode()).hexdigest()
                     if article_id in seen:
                         continue
-                    if not is_relevant_news(title, summary):
+                    if not is_war_news(title, summary):
                         continue
                     new_articles.append({"id": article_id, "title": title, "summary": summary, "link": link, "source": feed_info["name"]})
                     seen.add(article_id)
@@ -154,10 +176,8 @@ def run():
                 print(f"Yuborishda xato: {e}")
 
         save_seen(seen)
-        schedule.run_pending()  # Ertalabki yangiliklarni ham ishlatadi
         print(f"Kutilmoqda... {datetime.now().strftime('%H:%M')}")
         time.sleep(CHECK_INTERVAL)
 
-# ------------------ MAIN ------------------
 if __name__ == "__main__":
     run()
